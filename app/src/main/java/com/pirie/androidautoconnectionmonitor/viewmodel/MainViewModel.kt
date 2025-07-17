@@ -81,8 +81,13 @@ data class WifiHealth(
 data class BluetoothDevice(
     val name: String,
     val address: String,
-    val isHeadUnit: Boolean = false
+    val isHeadUnit: Boolean = false,
+    val connectionState: BluetoothConnectionState = BluetoothConnectionState.UNKNOWN
 )
+
+enum class BluetoothConnectionState {
+    CONNECTED, DISCONNECTED, CONNECTING, UNKNOWN
+}
 
 data class LogEntry(
     val timestamp: Long = System.currentTimeMillis(),

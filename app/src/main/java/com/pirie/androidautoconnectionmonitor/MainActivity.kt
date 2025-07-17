@@ -18,6 +18,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
@@ -33,16 +36,21 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import java.text.SimpleDateFormat
+import java.util.*
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.pirie.androidautoconnectionmonitor.managers.CarConnectionManager
 import com.pirie.androidautoconnectionmonitor.managers.BluetoothMonitor
 import com.pirie.androidautoconnectionmonitor.managers.WifiMonitor
+import com.pirie.androidautoconnectionmonitor.managers.LogcatReader
 import com.pirie.androidautoconnectionmonitor.ui.theme.AndroidAutoConnectionMonitorTheme
 import com.pirie.androidautoconnectionmonitor.viewmodel.MainViewModel
 import com.pirie.androidautoconnectionmonitor.viewmodel.CarConnectionState
@@ -53,6 +61,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var carConnectionManager: CarConnectionManager
     private lateinit var bluetoothMonitor: BluetoothMonitor
     private lateinit var wifiMonitor: WifiMonitor
+    private lateinit var logcatReader: LogcatReader
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -61,10 +70,12 @@ class MainActivity : ComponentActivity() {
         carConnectionManager = CarConnectionManager(applicationContext, viewModel)
         bluetoothMonitor = BluetoothMonitor(applicationContext, viewModel)
         wifiMonitor = WifiMonitor(applicationContext, viewModel)
+        logcatReader = LogcatReader(applicationContext, viewModel)
         
         lifecycle.addObserver(carConnectionManager)
         lifecycle.addObserver(bluetoothMonitor)
         lifecycle.addObserver(wifiMonitor)
+        lifecycle.addObserver(logcatReader)
 
         setContent {
             AndroidAutoConnectionMonitorTheme {
@@ -79,6 +90,7 @@ fun MainScreen(viewModel: MainViewModel) {
     val carConnectionState by viewModel.carConnectionState.collectAsState()
     val wifiHealth by viewModel.wifiHealth.collectAsState()
     val bluetoothDevices by viewModel.bluetoothDevices.collectAsState()
+    val logEntries by viewModel.logcatStream.collectAsState()
     val context = LocalContext.current
     var showPermissionDialog by remember { mutableStateOf(false) }
 
@@ -113,6 +125,10 @@ fun MainScreen(viewModel: MainViewModel) {
             
             item {
                 BluetoothDevicesCard(bluetoothDevices)
+            }
+            
+            item {
+                LogViewerCard(logEntries)
             }
         }
 
@@ -259,17 +275,137 @@ fun BluetoothDevicesCard(devices: List<com.pirie.androidautoconnectionmonitor.vi
                                 text = device.name,
                                 style = MaterialTheme.typography.bodyLarge
                             )
-                            if (device.isHeadUnit) {
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                if (device.isHeadUnit) {
+                                    Text(
+                                        text = "Head Unit",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                                val connectionColor = when (device.connectionState) {
+                                    com.pirie.androidautoconnectionmonitor.viewmodel.BluetoothConnectionState.CONNECTED -> Color.Green
+                                    com.pirie.androidautoconnectionmonitor.viewmodel.BluetoothConnectionState.CONNECTING -> Color.Blue
+                                    com.pirie.androidautoconnectionmonitor.viewmodel.BluetoothConnectionState.DISCONNECTED -> Color.Red
+                                    else -> Color.Gray
+                                }
                                 Text(
-                                    text = "Head Unit",
+                                    text = "●",
+                                    color = connectionColor,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                                Text(
+                                    text = device.connectionState.name.lowercase().replaceFirstChar { it.uppercase() },
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.primary
+                                    color = connectionColor
                                 )
                             }
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+fun LogViewerCard(logEntries: List<com.pirie.androidautoconnectionmonitor.viewmodel.LogEntry>) {
+    val listState = rememberLazyListState()
+    
+    // Auto-scroll to bottom when new entries are added
+    LaunchedEffect(logEntries.size) {
+        if (logEntries.isNotEmpty()) {
+            listState.animateScrollToItem(logEntries.size - 1)
+        }
+    }
+    
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp)
+        ) {
+            Text(
+                text = "System Logs",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+            
+            if (logEntries.isEmpty()) {
+                Text(
+                    text = "No logs available (READ_LOGS permission required)",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(16.dp)
+                )
+            } else {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(300.dp), // Fixed height for scrollable log area
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    items(logEntries) { logEntry ->
+                        LogEntryItem(logEntry)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun LogEntryItem(logEntry: com.pirie.androidautoconnectionmonitor.viewmodel.LogEntry) {
+    val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+    val timeString = timeFormat.format(Date(logEntry.timestamp))
+    
+    val textColor = when {
+        logEntry.isError -> Color.Red
+        logEntry.isWarning -> Color(255, 165, 0) // Orange
+        else -> MaterialTheme.colorScheme.onSurface
+    }
+    
+    val backgroundColor = when {
+        logEntry.isError -> Color.Red.copy(alpha = 0.1f)
+        logEntry.isWarning -> Color(255, 165, 0).copy(alpha = 0.1f) // Orange
+        else -> Color.Transparent
+    }
+    
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = backgroundColor)
+    ) {
+        Column(
+            modifier = Modifier.padding(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = logEntry.tag,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontFamily = FontFamily.Monospace
+                )
+                Text(
+                    text = timeString,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                    fontFamily = FontFamily.Monospace
+                )
+            }
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = logEntry.message,
+                style = MaterialTheme.typography.bodySmall,
+                color = textColor,
+                fontFamily = FontFamily.Monospace
+            )
         }
     }
 }
