@@ -30,6 +30,11 @@ class LogcatReader(
     private var logcatJob: Job? = null
     private var logcatProcess: Process? = null
     private val coroutineScope = CoroutineScope(Dispatchers.IO)
+    
+    // Rate limiting for repetitive messages
+    private val messageTracker = mutableMapOf<String, Pair<Long, Int>>() // message hash -> (last seen time, count)
+    private val rateLimitWindowMs = 30000L // 30 seconds
+    private val maxSameMessagePerWindow = 1 // Only 1 scan failure per 30 seconds
 
     // High-priority tags for critical events only
     private val criticalTags = setOf(
@@ -39,13 +44,16 @@ class LogcatReader(
     
     // Medium-priority tags for connection events
     private val connectionTags = setOf(
-        "BluetoothA2dp", "BluetoothHeadset", "WifiManager"
+        "BluetoothA2dp", "BluetoothHeadset", "WifiManager", "WifiStateMachine", 
+        "WifiService", "WifiNative", "SupplicantStaIfaceHal", "WifiClientModeImpl",
+        "ConnectivityService", "NetworkAgent"
     )
 
     // Critical keywords that indicate important events
     private val criticalKeywords = setOf(
         "connected", "disconnected", "connection", "projection", "android auto",
-        "head unit", "uconnect", "handshake", "session"
+        "head unit", "uconnect", "handshake", "session", "rssi", "signal",
+        "strength", "weak", "lost", "roaming", "scan", "associate", "authenticate"
     )
     
     // Error keywords that always get logged
@@ -220,9 +228,62 @@ class LogcatReader(
 
             if (!isRelevant) return null
 
+            // Special handling for repetitive scan failures
+            if (message.contains("Failed to start scan", ignoreCase = true)) {
+                val scanFailureKey = "WifiService:scan_failure"
+                val currentTime = System.currentTimeMillis()
+                
+                val (lastSeen, count) = messageTracker[scanFailureKey] ?: (0L to 0)
+                
+                if (currentTime - lastSeen < rateLimitWindowMs) {
+                    if (count >= maxSameMessagePerWindow) {
+                        // Skip this scan failure, but update count
+                        messageTracker[scanFailureKey] = lastSeen to (count + 1)
+                        return null
+                    }
+                    messageTracker[scanFailureKey] = lastSeen to (count + 1)
+                } else {
+                    // New time window, reset count
+                    messageTracker[scanFailureKey] = currentTime to 1
+                }
+                
+                // Add summary info for scan failures
+                val totalCount = messageTracker[scanFailureKey]?.second ?: 1
+                val finalMessage = if (totalCount > 1) {
+                    "WifiService scan failures (${totalCount}x in last 30s) - Wi-Fi adapter struggling"
+                } else {
+                    "WifiService scan failure detected - Wi-Fi adapter struggling"
+                }
+                
+                return LogEntry(
+                    tag = tag,
+                    message = finalMessage,
+                    isError = true,
+                    isWarning = false
+                )
+            }
+            
+            // Rate limit other repetitive messages
+            val messageKey = "$tag:${message.take(30)}" // Shorter key for better matching
+            val currentTime = System.currentTimeMillis()
+            
+            val (lastSeen, count) = messageTracker[messageKey] ?: (0L to 0)
+            
+            if (currentTime - lastSeen < rateLimitWindowMs) {
+                if (count >= maxSameMessagePerWindow) {
+                    messageTracker[messageKey] = lastSeen to (count + 1)
+                    return null
+                }
+                messageTracker[messageKey] = lastSeen to (count + 1)
+            } else {
+                messageTracker[messageKey] = currentTime to 1
+            }
+            
+            val finalMessage = message
+
             return LogEntry(
                 tag = tag,
-                message = message,
+                message = finalMessage,
                 isError = isError,
                 isWarning = isWarning
             )
